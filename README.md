@@ -1,0 +1,2 @@
+# CheckoutBot
+Automated Checkoutbot
