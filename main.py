@@ -14,7 +14,7 @@ from selenium.webdriver.support import expected_conditions as EC
 # Load environment variables from .env file
 load_dotenv()
 
-# Access the environment variables
+# Environment variables
 BASE_URL = os.getenv("BASE_URL")
 PRODUCT_URL = os.getenv("PRODUCT_URL")
 CHECKOUT_URL = os.getenv("CHECKOUT_URL")
@@ -33,17 +33,22 @@ selectors = {
     "email_popup_close": (By.CSS_SELECTOR, 'a.ltkpopup-close'),
     "availability": (By.XPATH, '//button[text()="Click to see availability."]'),
     "pick_up": (By.XPATH, '//button[p[text()="Pick Up"]]'),
-    "ship_to_me": (By.XPATH, '//button[p[text()="To Me or My Store"]]'),
+    "ship_to_me": (By.XPATH, "//button[contains(., 'To Me or My Store')]"),
     "add_to_cart": (By.CSS_SELECTOR, 'button.add-to-cart-button.button.full-width'),
     "checkout": (By.CSS_SELECTOR, 'button.button.cart-link'),
     "place_order": (By.CSS_SELECTOR, '[aria-label="Place order"]'),
     "cart_count": (By.CSS_SELECTOR, 'div.miniCart-numberOfItems'),
+    # Added login modal selector
+    "login_modal": (By.CSS_SELECTOR, 'div.modal-content[aria-labelledby="Account Login"]')
 }
 
 
 def initialize_logging():
     """Configures logging."""
-    os.makedirs(os.path.dirname(LOG_FILE_PATH), exist_ok=True)
+    try:
+        os.makedirs(os.path.dirname(LOG_FILE_PATH), exist_ok=True)
+    except Exception as e:
+        print(f"Error creating log directory: {e}")
     log_formatter = colorlog.ColoredFormatter(
         "%(log_color)s%(asctime)s - %(levelname)s - %(message)s",
         log_colors={
@@ -64,8 +69,6 @@ def initialize_logging():
 def handle_proxies(file_path):
     """Handles loading, validating, and saving proxies."""
     valid_proxies = []
-
-    # Load proxies from the file
     try:
         with open(file_path, 'r') as f:
             proxies = [line.strip() for line in f.readlines() if line.strip()]
@@ -73,7 +76,6 @@ def handle_proxies(file_path):
         logging.error(f"Proxy file {file_path} not found.")
         return []
 
-    # Validate each proxy
     for proxy in proxies:
         try:
             response = requests.get('https://httpbin.org/ip', proxies={"http": proxy, "https": proxy}, timeout=10)
@@ -84,31 +86,47 @@ def handle_proxies(file_path):
         except requests.RequestException as e:
             logging.error(f"Error with proxy {proxy}: {e}")
 
-    # Save only the valid proxies back to the file
-    with open(file_path, 'w') as f:
-        for proxy in valid_proxies:
-            f.write(f"{proxy}\n")
+    try:
+        with open(file_path, 'w') as f:
+            for proxy in valid_proxies:
+                f.write(f"{proxy}\n")
+    except Exception as e:
+        logging.error(f"Error writing to proxy file: {e}")
 
     logging.info(f"Proxy file updated. {len(valid_proxies)} valid proxies remaining.")
-
     return valid_proxies
 
 
 def element_click(driver, selector, timeout=10):
-    """Waits for an element to be clickable and clicks it."""
+    """Waits for an element's presence and clicks it.
+       Falls back to a JavaScript click if the standard click fails.
+    """
     try:
-        element = WebDriverWait(driver, timeout).until(EC.element_to_be_clickable(selector))
+        # Wait for the element to be present in the DOM
+        element = WebDriverWait(driver, timeout).until(EC.presence_of_element_located(selector))
         element.click()
+        logging.info(f"{selector} button pressed successfully.")
         return True
     except Exception as e:
-        logging.error(f"Failed to interact with element {selector}: {e}")
-        return False
+        logging.error(f"Standard click failed for {selector}: {e}. Trying JavaScript click...")
+        try:
+            element = WebDriverWait(driver, timeout).until(EC.presence_of_element_located(selector))
+            driver.execute_script("arguments[0].click();", element)
+            logging.info(f"{selector} button pressed using JAVASCRIPT successfully.")
+            return True
+        except Exception as e_js:
+            logging.error(f"JavaScript click also failed for {selector}: {e_js}")
+            return False
 
 
 def element_input(driver, selector, value, timeout=10):
-    """Waits for an input field and enters text."""
+    """Waits for an input field to be visible, scrolls it into view, clears it, and enters text."""
     try:
-        element = WebDriverWait(driver, timeout).until(EC.presence_of_element_located(selector))
+        element = WebDriverWait(driver, timeout).until(
+            EC.visibility_of_element_located(selector)
+        )
+        # Scroll the element into view
+        # driver.execute_script("arguments[0].scrollIntoView(true);", element)
         element.clear()
         element.send_keys(value)
         return True
@@ -117,106 +135,211 @@ def element_input(driver, selector, value, timeout=10):
         return False
 
 
-def check_cart_item_count(driver, max_items):
-    """Checks the current cart item count and verifies it is within valid range."""
+def check_and_verify_cart_count(driver, max_items=2, timeout=10):
+    """
+    Waits for the cart count element to be visible, retrieves and verifies that the number
+    of items is a valid integer within the expected range (1 to max_items).
+    Returns True if the cart count is valid; otherwise logs an error and returns False.
+    """
     try:
-        # Find the element by its class name
-        cart_item_count_element = driver.find_element(By.CLASS_NAME, "miniCart-numberOfItems")
-
-        # Get the text inside the div
-        item_count = cart_item_count_element.text
-
-        # Check if the item count is a valid integer and within the range (0, max_items)
-        if item_count.isdigit():
-            item_count_int = int(item_count)
+        cart_item_count_element = WebDriverWait(driver, timeout).until(
+            EC.visibility_of_element_located(selectors["cart_count"])
+        )
+        item_count_str = cart_item_count_element.text.strip()
+        if item_count_str.isdigit():
+            item_count_int = int(item_count_str)
             if 0 < item_count_int <= max_items:
-                return item_count_int
+                logging.info(f"Current number of items in the cart: {item_count_int}.")
+                return True
             else:
-                raise ValueError(f"Item count is not in the expected range (1 to {max_items}).")
+                logging.error(f"Item count {item_count_int} is not in the expected range (1 to {max_items}).")
+                return False
         else:
-            raise ValueError("Invalid item count value.")
+            logging.error("Invalid cart item count value.")
+            return False
+    except Exception as e:
+        logging.exception("Exception during cart count verification: %s", e)
+        return False
+
+
+def login_site(driver):
+    """Handles the login and initial navigation steps."""
+    try:
+        # Age verification
+        if not element_click(driver, selectors["age_verification"]):
+            logging.error("Age verification failed.")
+            return False
+
+        # Open login modal
+        if not element_click(driver, selectors["login_button"]):
+            logging.error("Login button click failed.")
+            return False
+
+        # Input email and password
+        if not element_input(driver, (By.ID, "authentication_header_login_form_email"), EMAIL):
+            logging.error("Email input failed.")
+            return False
+        if not element_input(driver, (By.ID, "authentication_header_login_form_password"), PASSWORD):
+            logging.error("Password input failed.")
+            return False
+
+        # Submit login
+        if not element_click(driver, selectors["account_login"]):
+            logging.error("Login submission failed.")
+            return False
+
+        # Wait until the login dialog disappears to ensure authentication is complete
+        WebDriverWait(driver, 10).until(EC.invisibility_of_element_located(selectors["login_modal"]))
+
+        # Wait for the account popover element to be visible as a verification step
+        account_popover_selector = (By.ID, "account-popover-open")
+        WebDriverWait(driver, 10).until(EC.visibility_of_element_located(account_popover_selector))
+
+        logging.info("Login successful.")
+        return True
+    except Exception as e:
+        logging.exception("Exception during login: %s", e)
+        return False
+
+
+def is_shipping_available(driver, timeout=10):
+    """
+    Checks the availability-info element to determine if the item is available for shipping.
+    Returns True if available, False if out of stock.
+    """
+    try:
+        availability_info = WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div.availability-info"))
+        )
+        availability_text = availability_info.text.strip().lower()
+        logging.info(f"Availability text: {availability_text}")
+        if "out of stock" in availability_text or "unavailable for shipping" in availability_text:
+            logging.info("Item is not available for shipping (Out of Stock).")
+            return False
+        else:
+            logging.info("Item is available for shipping.")
+            return True
+    except Exception as e:
+        logging.error(f"Error checking shipping availability: {e}")
+        return False
+
+
+def add_to_cart(driver):
+    """Navigates to the product page and adds the product to the cart.
+       Handles cases where clicking the availability/ship-to-me buttons is required,
+       as well as when the item can be added directly.
+    """
+    try:
+        # Hard-coded product id for test purposes
+        # test_product = "000006283"
+        test_product = "000096059"
+        product_url = PRODUCT_URL + test_product
+        driver.get(product_url)
+        time.sleep(5)
+
+        # Check shipping availability before proceeding
+        if not is_shipping_available(driver):
+            logging.error("Item is not available for shipping.")
+            return False
+
+        # Close email popup if it exists
+        element_click(driver, selectors["email_popup_close"])
+        time.sleep(3)
+
+        # Attempt to click the availability button if it exists.
+        # If the availability button isn't found or interactable, proceed directly.
+        if element_click(driver, selectors["availability"]):
+            logging.info("Clicked availability button.")
+            # Attempt to click the "ship to me" option.
+            if element_click(driver, selectors["ship_to_me"]):
+                logging.info("Clicked ship-to-me option.")
+            else:
+                logging.warning("Ship-to-me option not clickable or not required; proceeding.")
+        else:
+            logging.info("Availability button not present or not required; proceeding directly.")
+
+        # Click the add-to-cart button
+        if not element_click(driver, selectors["add_to_cart"]):
+            logging.error("Add to cart action failed.")
+            return False
+
+        # Verify cart item count using the combined check
+        if check_and_verify_cart_count(driver):
+            return True
+        else:
+            logging.error("Failed to verify cart item count.")
+            return False
 
     except Exception as e:
-        # Log the error and return None or raise error as needed
-        logging.error(f"Cart check error: {e}")
-        return None
+        logging.exception("Exception during add to cart: %s", e)
+        return False
+
+
+def proceed_to_checkout(driver):
+    """Handles the checkout process."""
+    try:
+        driver.get(CHECKOUT_URL)
+        # time.sleep(7)
+
+        if not element_input(driver, (By.ID, "csv-code"), CSV_NUMBER):
+            logging.error("Failed to input CSV number.")
+            return False
+
+        if not element_click(driver, selectors["place_order"]):
+            logging.error("Failed to click on 'Place order'.")
+            return False
+
+        try:
+            driver.save_screenshot(SCREENSHOT_PATH)
+            logging.info(f"Screenshot taken and saved to {SCREENSHOT_PATH}")
+        except Exception as e:
+            logging.error(f"Failed to save screenshot: {e}")
+
+        logging.info("Checkout process completed successfully.")
+        return True
+    except Exception as e:
+        logging.exception("Exception during checkout: %s", e)
+        return False
 
 
 def main():
-    """Main function to automate the purchase of liquor."""
+    """Main function to automate the purchase process."""
     start_time = time.time()
     initialize_logging()
+    driver = None
+    try:
+        options = Options()
+        options.page_load_strategy = 'normal'
+        # Uncomment and set proxy if needed:
+        # options.add_argument('--proxy-server=%s' % PROXY)
+        driver = webdriver.Chrome(options=options)
+        driver.maximize_window()
 
-    # Main Code Here:
-    options = Options()
-    options.page_load_strategy = 'normal'
-    # options.add_argument("--headless=new")
-    # chrome_options.add_argument('--proxy-server=%s' % PROXY)
-    driver = webdriver.Chrome(options=options)
-    # driver.maximize_window()
+        driver.get(BASE_URL)
+        # time.sleep(3)
 
-    # Load the website
-    driver.get(BASE_URL)
-    time.sleep(3)
+        if not login_site(driver):
+            logging.error("Login process failed. Exiting.")
+            return
 
-    # Age verification
-    element_click(driver, selectors["age_verification"])
+        if not add_to_cart(driver):
+            logging.error("Add to cart process failed. Exiting.")
+            return
 
-    # Log in to the site
-    element_click(driver, selectors["login_button"])
-    element_input(driver, (By.ID, "authentication_header_login_form_email"), EMAIL)
-    element_input(driver, (By.ID, "authentication_header_login_form_password"), PASSWORD)
-    element_click(driver, selectors["account_login"])
+        if not proceed_to_checkout(driver):
+            logging.error("Checkout process failed. Exiting.")
+            return
 
-    # Go to desired product page
-    # Makers Mark Mini test product
-    test_product = "000006283"
-    driver.get(PRODUCT_URL + test_product)
-    time.sleep(5)
-
-    # Close email address pop up box, if it exists
-    element_click(driver, selectors["email_popup_close"])
-    time.sleep(3)
-
-    # Add to cart
-    element_click(driver, selectors["availability"])
-    element_click(driver, selectors["ship_to_me"])
-    element_click(driver, selectors["add_to_cart"])
-
-    # Could add a verification that item added to cart successfully
-    tmp = selectors["cart_count"]
-
-    # Define the maximum allowed items in the cart
-    max_items = 2
-
-    # Call the function to check the cart item count with the maximum item count
-    item_count = check_cart_item_count(driver, max_items)
-
-    # Check if the value is valid (non-None and within the expected range)
-    if item_count is not None:
-        logging.info(f"Current number of items in the cart: {item_count}.")
-    else:
-        logging.warning(f"Error: Unable to retrieve or validate the number of items in the cart.")
-
-    # Checkout
-    driver.get(CHECKOUT_URL)
-    time.sleep(7)
-    element_input(driver, (By.ID, "csv-code"), CSV_NUMBER)
-    element_click(driver, selectors["place_order"])
-
-    # Take a Screenshot
-    driver.save_screenshot(SCREENSHOT_PATH)
-    logging.info(f"Screenshot taken and saved to {SCREENSHOT_PATH}")
-
-    # send telegram message with order confirmation and details
-    # add logic to prevent repeat orders
-
-    # Close the driver
-    driver.quit()
-
-    # End time tracking and print the execution time
-    elapsed_time = time.time() - start_time
-    logging.info(f"Execution completed in {elapsed_time:.2f} seconds.")
+    except Exception as e:
+        logging.exception("An unexpected error occurred: %s", e)
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except Exception as e:
+                logging.error(f"Error while quitting the driver: {e}")
+        elapsed_time = time.time() - start_time
+        logging.info(f"Execution completed in {elapsed_time:.2f} seconds.")
 
 
 if __name__ == "__main__":
