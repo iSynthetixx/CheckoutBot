@@ -16,6 +16,7 @@ load_dotenv()
 
 # Environment variables
 BASE_URL = os.getenv("BASE_URL")
+LOGIN_URL = os.getenv("LOGIN_URL")
 PRODUCT_URL = os.getenv("PRODUCT_URL")
 CHECKOUT_URL = os.getenv("CHECKOUT_URL")
 EMAIL = os.getenv("EMAIL")
